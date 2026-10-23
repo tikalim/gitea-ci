@@ -49,7 +49,13 @@ doit jamais tourner à côté d'autre chose. L'installation refuse une machine q
 | VM du runner | miroirs Ubuntu, `dl.gitea.com` | installation |
 | Postes des analystes | serveur Gitea, port 3000 | consultation des journaux |
 
-Derrière un proxy sortant : `GITEA_PROXY_*` dans `serveur/.env`, et `--proxy` à l'installation du runner.
+Derrière un proxy sortant : `GITEA_PROXY_*` dans `serveur/.env`, et `--proxy` à l'installation du runner. La liste
+des hôtes passant par le proxy doit inclure **`*.github.com`** en plus de `github.com` (`api.github.com`…) : sinon
+Gitea tente une connexion directe vers ces sous-domaines, qui expire (`dial tcp …:443: i/o timeout`).
+
+Serveur Gitea déjà en place : dans son `app.ini`, `[proxy]` avec `PROXY_ENABLED = true`, `PROXY_URL` et
+`PROXY_HOSTS = github.com,*.github.com`, ainsi que `[git.config] http.proxy` pour les clones et synchros des miroirs.
+Créez les miroirs avec le type **Git** (et non GitHub, qui appelle l'API de GitHub).
 
 ## 2. Serveur Gitea
 
