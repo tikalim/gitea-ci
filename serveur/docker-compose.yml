@@ -1,0 +1,158 @@
+# CI auto-hébergée des plateformes Blue team : Gitea 28.2.0 et sa base PostgreSQL 18 dédiée (aucune base partagée).
+# Gitea tient un miroir des dépôts GitHub (récupéré toutes les 2 minutes) et lance les workflows .gitea/workflows sur
+# chaque branche reçue ; les jobs tournent sur le runner (VM séparée, voir ../runner). Docker ou Podman :
+#   docker compose up -d        |   podman compose up -d
+# Secrets : deploy/secrets/ (créés par ./preparer.sh, jamais versionnés). Certificat HTTPS : deploy/certs/.
+name: gitea-ci
+
+services:
+  gitea:
+    image: docker.gitea.com/gitea:28.2.0-rootless@sha256:94807314454f6525994a3b76286ba12bc7e7f8cd14f61d9e67431767f8103306
+    restart: unless-stopped
+    labels: { ci.conserver: "true" }       # épargné par le nettoyage d'un runner sur la même machine (déconseillé)
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    pids_limit: 400
+    ports:
+      # Interface d'écoute choisie dans .env (adresse du réseau interne, jamais 0.0.0.0 sur une machine exposée)
+      - "${GITEA_BIND:-127.0.0.1}:${GITEA_PORT:-3000}:3000"
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      # --- serveur : HTTPS natif (le runner y envoie ses jetons et reçoit les secrets des jobs), pas de SSH
+      GITEA__server__PROTOCOL: https
+      GITEA__server__ROOT_URL: "https://${GITEA_DOMAIN:?GITEA_DOMAIN manquant dans .env}:${GITEA_PORT:-3000}/"
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__server__CERT_FILE: /etc/gitea/certs/cert.pem
+      GITEA__server__KEY_FILE: /etc/gitea/certs/key.pem
+      GITEA__server__DISABLE_SSH: "true"
+      GITEA__server__START_SSH_SERVER: "false"
+      GITEA__server__OFFLINE_MODE: "true"
+      GITEA__server__LANDING_PAGE: login
+      # --- base dédiée
+      GITEA__database__DB_TYPE: postgres
+      GITEA__database__HOST: db:5432
+      GITEA__database__NAME: gitea
+      GITEA__database__USER: gitea
+      GITEA__database__PASSWD__FILE: /run/secrets/gitea_db_password
+      GITEA__database__SSL_MODE: disable              # réseau interne du déploiement, sans port publié
+      # --- sécurité
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__security__SECRET_KEY__FILE: /run/secrets/gitea_secret_key
+      GITEA__security__INTERNAL_TOKEN__FILE: /run/secrets/gitea_internal_token
+      GITEA__security__MIN_PASSWORD_LENGTH: "14"
+      GITEA__security__PASSWORD_COMPLEXITY: "lower,upper,digit"
+      GITEA__security__EGRESS_MODE: strict           # ni webhook ni OAuth sortant : aucune destination admise
+      GITEA__session__COOKIE_SECURE: "true"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__service__REQUIRE_SIGNIN_VIEW: "true"
+      GITEA__service__DEFAULT_KEEP_EMAIL_PRIVATE: "true"
+      GITEA__openid__ENABLE_OPENID_SIGNIN: "false"
+      GITEA__repository__DEFAULT_PRIVATE: private
+      # Un miroir n'a pas Actions par défaut (DEFAULT_MIRROR_REPO_UNITS) : sans lui, aucun workflow ne part
+      GITEA__repository__DEFAULT_MIRROR_REPO_UNITS: "repo.code,repo.actions"
+      # --- miroirs : GitHub seulement, relevés toutes les 2 minutes (le planificateur vérifie toutes les 2 minutes)
+      GITEA__mirror__MIN_INTERVAL: 2m
+      GITEA__mirror__DEFAULT_INTERVAL: 2m
+      GITEA__cron_0x2E_update_mirrors__SCHEDULE: "@every 2m"
+      GITEA__migrations__EGRESS_MODE: strict
+      GITEA__migrations__ALLOWED_HOST_LIST: "${GITEA_MIRROR_HOSTS:-github.com}"
+      # Proxy sortant éventuel (vide : connexion directe) ; il porte alors le filtrage des destinations
+      GITEA__proxy__PROXY_ENABLED: "${GITEA_PROXY_ENABLED:-false}"
+      GITEA__proxy__PROXY_URL: "${GITEA_PROXY_URL:-}"
+      GITEA__proxy__PROXY_HOSTS: "${GITEA_PROXY_HOSTS:-github.com}"
+      # --- Actions : actions publiques (checkout, setup-python…) téléchargées depuis github.com par le runner
+      GITEA__actions__ENABLED: "true"
+      GITEA__actions__DEFAULT_ACTIONS_URL: github
+      GITEA__log__LEVEL: Info
+    secrets:
+      - gitea_db_password
+      - gitea_secret_key
+      - gitea_internal_token
+    volumes:
+      - gitea_data:/var/lib/gitea
+      - gitea_config:/etc/gitea
+      - ./deploy/certs:/etc/gitea/certs:ro
+    networks: [interne, sortie]
+    depends_on:
+      db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsSk", "https://127.0.0.1:3000/api/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+  db:
+    image: docker.io/library/postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
+    restart: unless-stopped
+    labels: { ci.conserver: "true" }       # épargné par le nettoyage d'un runner sur la même machine (déconseillé)
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /var/run/postgresql:size=1m,mode=2777
+    cap_drop: [ALL]
+    # Le point d'entrée de l'image prépare le volume en root puis passe à l'utilisateur postgres
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    pids_limit: 200
+    shm_size: 128m
+    environment:
+      POSTGRES_DB: gitea
+      POSTGRES_USER: gitea
+      POSTGRES_PASSWORD_FILE: /run/secrets/gitea_db_password
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --data-checksums"
+    secrets:
+      - gitea_db_password
+    volumes:
+      - gitea_pg:/var/lib/postgresql          # PostgreSQL 18 : données sous /var/lib/postgresql/18/docker
+    networks: [interne]                       # aucun port publié, aucun accès sortant
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "gitea", "-d", "gitea"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+networks:
+  interne:
+    internal: true
+    labels: { ci.conserver: "true" }
+    ipam:
+      config:
+        - subnet: "${GITEA_NET_INTERNE:-192.168.251.96/28}"
+  sortie:
+    labels: { ci.conserver: "true" }
+    ipam:
+      config:
+        - subnet: "${GITEA_NET_SORTIE:-192.168.251.112/28}"
+
+secrets:
+  gitea_db_password:
+    file: ./deploy/secrets/gitea_db_password
+  gitea_secret_key:
+    file: ./deploy/secrets/gitea_secret_key
+  gitea_internal_token:
+    file: ./deploy/secrets/gitea_internal_token
+
+volumes:
+  gitea_data:
+    name: gitea_ci_data
+    labels: { ci.conserver: "true" }
+  gitea_config:
+    name: gitea_ci_config
+    labels: { ci.conserver: "true" }
+  gitea_pg:
+    name: gitea_ci_pg
+    labels: { ci.conserver: "true" }

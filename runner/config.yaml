@@ -1,0 +1,36 @@
+# Gitea Runner 5.2.2 de la CI Blue team (installé par installer-runner.sh dans /etc/gitea-runner/config.yaml).
+# Mode « hôte » sur une VM DÉDIÉE : les jobs tournent comme l'utilisateur ci, avec Docker, Podman, Python, Node et Rust de
+# la VM, comme sur une machine GitHub. Les workflows actuels supposent une machine propre à chaque job (noms de conteneurs,
+# volumes et ports fixes) : un seul job à la fois, et nettoyage complet après chaque job (post_task_script).
+log:
+  level: info
+  job:
+    dir: /var/log/gitea-runner/jobs        # copie locale de chaque journal de job
+    retention: 336h
+    max_size: 200MB
+
+runner:
+  file: /var/lib/gitea-runner/.runner
+  capacity: 1                              # un job à la fois : ports 8000/8001, noms de conteneurs et volumes fixes
+  timeout: 2h
+  shutdown_timeout: 30m                    # un arrêt de service laisse finir le job en cours
+  fetch_interval: 2s
+  fetch_interval_max: 10s
+  labels:
+    - "ci-hote:host"
+  tool_cache_mode: shared                  # Python et Node de setup-* gardés d'un job à l'autre (capacité 1 seulement)
+  post_task_script: /usr/local/libexec/gitea-ci-nettoyage
+  post_task_script_timeout: 5m
+
+host:
+  workdir_parent: /var/lib/gitea-runner/travail
+
+cache:
+  enabled: true
+  dir: /var/lib/gitea-runner/cache          # cache de pip et npm (actions/setup-*)
+  retention: 168h
+  repo_size_limit: 10GB
+
+health_check:
+  enabled: true
+  min_free_disk_space_mb: 20480            # images, couches et caches : pas de nouveau job sous 20 Go libres

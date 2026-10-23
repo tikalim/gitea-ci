@@ -1,0 +1,6 @@
+# Jamais versionnés : configuration locale, secrets, certificats et clés
+serveur/.env
+serveur/deploy/secrets/*
+!serveur/deploy/secrets/.gitkeep
+serveur/deploy/certs/*
+!serveur/deploy/certs/.gitkeep
