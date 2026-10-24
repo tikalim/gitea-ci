@@ -64,7 +64,7 @@ services:
       # Proxy sortant éventuel (vide : connexion directe) ; il porte alors le filtrage des destinations
       GITEA__proxy__PROXY_ENABLED: "${GITEA_PROXY_ENABLED:-false}"
       GITEA__proxy__PROXY_URL: "${GITEA_PROXY_URL:-}"
-      GITEA__proxy__PROXY_HOSTS: "${GITEA_PROXY_HOSTS:-github.com}"
+      GITEA__proxy__PROXY_HOSTS: "${GITEA_PROXY_HOSTS:-github.com,*.github.com}"   # api.github.com, codeload… : sous-domaines indispensables
       # --- Actions : actions publiques (checkout, setup-python…) téléchargées depuis github.com par le runner
       GITEA__actions__ENABLED: "true"
       GITEA__actions__DEFAULT_ACTIONS_URL: github
